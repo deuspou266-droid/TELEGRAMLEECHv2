@@ -38,6 +38,7 @@ from .stats import bot_stats, stats_pages, get_packages_version
 from .status import task_status, status_pages
 from .users_settings import get_users_settings, edit_user_settings, send_user_settings
 from .ytdlp import ytdl, ytdl_leech
+from .spotdl import spotdl, spotdl_leech
 from .mangaleech import (
     mangaleech,
     manga_source_callback,
@@ -115,4 +116,6 @@ __all__ = [
     "manga_mode_callback",
     "manga_result_callback",
     "manga_message_handler",
+    "spotdl",
+    "spotdl_leech",
 ]
