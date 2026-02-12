@@ -428,9 +428,17 @@ class TelegramUploader:
         if self._listener.is_cancelled:
             return
         if self._total_files == 0:
-            await self._listener.on_upload_error(
-                "No files to upload. In case you have filled EXCLUDED_EXTENSIONS, then check if all files have those extensions or not."
-            )
+            ex_cfg = getattr(Config, "EXCLUDED_EXTENSIONS", "") or ""
+            user_ex = self._listener.user_dict.get("EXCLUDED_EXTENSIONS", "") or ""
+            ex_list = user_ex if user_ex else ex_cfg
+            if ex_list:
+                await self._listener.on_upload_error(
+                    f"No files to upload. EXCLUDED_EXTENSIONS is set: {ex_list}.\nCheck whether the downloaded files actually match allowed extensions."
+                )
+            else:
+                await self._listener.on_upload_error(
+                    "No files to upload. In case you have filled EXCLUDED_EXTENSIONS, then check if all files have those extensions or not."
+                )
             return
         if self._total_files <= self._corrupted:
             await self._listener.on_upload_error(
