@@ -189,6 +189,19 @@ class SpotdlHelper:
             
             # Get songs from link
             songs = self.spotdl_client.search([link])
+
+            # Tentar anexar um logger customizado para capturar mensagens do spotdl
+            try:
+                if hasattr(self.spotdl_client, "logger"):
+                    self.spotdl_client.logger = MyLogger(self, self._listener)
+                if hasattr(self.spotdl_client, "downloader"):
+                    dl = self.spotdl_client.downloader
+                    if hasattr(dl, "logger"):
+                        dl.logger = MyLogger(self, self._listener)
+                    elif hasattr(dl, "_logger"):
+                        dl._logger = MyLogger(self, self._listener)
+            except Exception as e:
+                LOGGER.warning(f"Could not attach spotdl logger: {e}")
             
             if not songs:
                 raise ValueError("No songs found in Spotify link")

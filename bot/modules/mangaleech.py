@@ -244,6 +244,8 @@ async def _handle_search_link_input(client, message, user_id, state, stage):
             return
         
         info = await downloader.get_manga_info(selected_url)
+        # Guardar info no estado para usar ao enviar arquivos
+        manga_user_state[user_id]["info"] = info
         
         # Build info message
         msg = f"📖 <b>{info.get('title', 'Desconhecido')}</b>\n\n"
@@ -309,6 +311,8 @@ async def manga_result_callback(client, query):
         info_msg = await send_message(query.message.chat.id, "📊 Carregando capítulos...")
         chapters = await downloader.list_chapters(selected_url)
         info = await downloader.get_manga_info(selected_url)
+        # Guardar info no estado para uso posterior
+        manga_user_state[user_id]["info"] = info
         
         # Build info message
         msg = f"📖 <b>{info.get('title', 'Desconhecido')}</b>\n\n"
@@ -388,13 +392,14 @@ async def _handle_chapter_input(client, message, user_id, state):
             )
             
             if cbz_path:
-                results.append((cbz_path, page_count))
+                # armazenar também o URL do capítulo para recuperar o número
+                results.append((cbz_path, page_count, chapter_url))
         
         if results:
             # Show completion message
             msg = "✅ <b>Download concluído!</b>\n\n"
             total_size = 0
-            for filepath, pages in results:
+            for filepath, pages, chapter_url in results:
                 size = await aiopath.getsize(filepath)
                 total_size += size
                 chapter_name = filepath.split("/")[-1].replace(".cbz", "")
@@ -406,18 +411,27 @@ async def _handle_chapter_input(client, message, user_id, state):
             # Send files to Telegram
             send_msg = await send_message(message, "📤 Enviando capítulos para Telegram...")
             
-            for idx, (filepath, pages) in enumerate(results, 1):
+            for idx, (filepath, pages, chapter_url) in enumerate(results, 1):
                 try:
                     chapter_name = filepath.split("/")[-1]
                     # Update sending progress
                     sending_pct = int((idx / len(results)) * 100)
                     sending_bar = get_progress_bar_string(f"{sending_pct}%")
                     
-                    sending_info = f"📤 Enviando: {sending_bar} {sending_pct}%\n{idx}/{len(results)} - {chapter_name}"
+                    # Recuperar número do capítulo a partir do URL
+                    try:
+                        chapter_num = chapter_url.split("capitulo-")[1].rstrip("/")
+                    except Exception:
+                        chapter_num = chapter_name.replace('.cbz','')
+
+                    obra_title = state.get("info", {}).get("title", chapter_name.replace('.cbz',''))
+                    display_title = f"{obra_title} cap {chapter_num}"
+
+                    sending_info = f"📤 Enviando: {sending_bar} {sending_pct}%\n{idx}/{len(results)} - {display_title}"
                     await edit_message(send_msg, sending_info)
-                    
-                    # Send the file
-                    caption = f"📖 {chapter_name}\n📄 {pages} páginas"
+
+                    # Send the file with formatted caption
+                    caption = f"{display_title}\n📄 {pages} páginas"
                     await send_file(message, filepath, caption=caption)
                     
                     # Delete file after successful send
