@@ -1,9 +1,9 @@
 from logging import getLogger
-from os import path as ospath, makedirs, getcwd, chdir, path
+from os import makedirs, getcwd, chdir
+from os import path as ospath  # único alias para os.path — sem "path" solto
 from shutil import rmtree, copyfile
 from secrets import token_hex
 from contextlib import suppress
-from shutil import rmtree
 
 from spotdl import Spotdl
 from spotdl.types.song import Song
@@ -34,16 +34,13 @@ def get_spotdl_client(ffmpeg=None, bitrate="320k", fmt="mp3", threads=4):
     if _GLOBAL_SPOTDL_CLIENT is not None:
         return _GLOBAL_SPOTDL_CLIENT
 
-    # Ensure only one thread tries to initialize at a time
     with _GLOBAL_SPOTDL_LOCK:
         if _GLOBAL_SPOTDL_CLIENT is not None:
             return _GLOBAL_SPOTDL_CLIENT
 
-        # Get Spotify credentials from config if available
         client_id = Config.SPOTIFY_CLIENT_ID or None
         client_secret = Config.SPOTIFY_CLIENT_SECRET or None
 
-        # Try a couple times in case of race conditions inside external lib
         for attempt in range(3):
             try:
                 client = Spotdl(
@@ -61,16 +58,14 @@ def get_spotdl_client(ffmpeg=None, bitrate="320k", fmt="mp3", threads=4):
                 LOGGER.info("Spotdl client initialized (singleton)")
                 return _GLOBAL_SPOTDL_CLIENT
             except Exception as e:
-                # If error indicates client already initialized, wait and retry
                 msg = str(e).lower()
                 LOGGER.warning(f"Spotdl init attempt {attempt+1} failed: {e}")
                 if "already been initialized" in msg or "already initialized" in msg:
                     _sleep(0.5)
                     continue
-                # For other errors, re-raise after logging
                 LOGGER.error(f"Failed to initialize spotdl client: {e}")
                 raise
-        # Final check
+
         if _GLOBAL_SPOTDL_CLIENT is None:
             raise RuntimeError("Unable to initialize spotdl client")
 
@@ -93,7 +88,6 @@ def get_ffmpeg_path():
         return ffmpeg_path
     except ImportError:
         LOGGER.warning("imageio-ffmpeg not found, trying system ffmpeg")
-        # Fallback to system ffmpeg or BinConfig
         return BinConfig.FFMPEG_NAME if hasattr(BinConfig, 'FFMPEG_NAME') else 'ffmpeg'
 
 
@@ -107,7 +101,9 @@ class MyLogger:
 
     def info(self, msg):
         LOGGER.info(msg)
-        if "Downloaded" in msg:
+        # FIX: só conta como downloaded se for mensagem de sucesso real do spotdl,
+        # não qualquer mensagem que contenha a palavra "Downloaded"
+        if msg.startswith("Downloaded") or " - Downloaded" in msg:
             self._obj.playlist_count += 1
 
     def warning(self, msg):
@@ -130,11 +126,11 @@ class SpotdlHelper:
         self.is_playlist = False
         self.playlist_count = 0
         self.total_songs = 0
-        # Spotdl client reference (may point to shared singleton)
         self.spotdl_client = None
-        # Cookie file usado para download
+        # FIX: cookie_to_use como atributo da instância para ser acessível
+        # em _download() sem depender do escopo de _extract_meta_data()
         self.cookie_to_use = None
-        
+
     @property
     def download_speed(self):
         return self._download_speed
@@ -161,7 +157,6 @@ class SpotdlHelper:
         return self._eta
 
     def _on_download_progress(self, progress_handler):
-        """Callback for download progress"""
         if self._listener.is_cancelled:
             raise ValueError("Cancelling...")
 
@@ -180,19 +175,26 @@ class SpotdlHelper:
     def _extract_meta_data(self, link):
         """Extract metadata from Spotify link"""
         try:
-            # Decide qual arquivo de cookies usar (mesma lógica do módulo ytdlp)
+            # FIX: usa self.cookie_to_use em vez de variável local,
+            # para que _download() possa acessá-la depois.
+            # FIX: usa ospath.exists() em vez de path.exists()
+            # (o nome "path" não é mais importado solto)
             self.cookie_to_use = None
             try:
                 usr_cookie = self._listener.user_dict.get("USER_COOKIE_FILE", "")
                 use_default = self._listener.user_dict.get("USE_DEFAULT_COOKIE", False)
-                if not use_default and usr_cookie and path.exists(usr_cookie):
+                if not use_default and usr_cookie and ospath.exists(usr_cookie):
                     self.cookie_to_use = usr_cookie
-                elif path.exists("cookies.txt"):
+                elif ospath.exists("cookies.txt"):
                     self.cookie_to_use = "cookies.txt"
             except Exception:
                 self.cookie_to_use = None
 
-            # Inicializa/obtém cliente Spotdl compartilhado para evitar erro
+            if self.cookie_to_use:
+                LOGGER.info(f"Using cookie file: {self.cookie_to_use}")
+            else:
+                LOGGER.warning("No cookie file found. Download may fail on restricted content.")
+
             ffmpeg_path = get_ffmpeg_path()
             self.spotdl_client = get_spotdl_client(
                 ffmpeg=ffmpeg_path,
@@ -201,22 +203,21 @@ class SpotdlHelper:
                 threads=4,
             )
 
-            # Tentar injetar cookiefile nas opções do downloader/yt-dlp, se possível
+            # Injetar cookiefile nas opções internas do yt-dlp do spotdl
             if self.cookie_to_use and hasattr(self.spotdl_client, "downloader"):
                 try:
                     dl = self.spotdl_client.downloader
-                    # vários nomes possíveis internalmente
                     if hasattr(dl, "ydl_opts") and isinstance(dl.ydl_opts, dict):
                         dl.ydl_opts["cookiefile"] = self.cookie_to_use
+                        LOGGER.info("Injected cookiefile into ydl_opts")
                     if hasattr(dl, "_ytdl_params") and isinstance(dl._ytdl_params, dict):
                         dl._ytdl_params["cookiefile"] = self.cookie_to_use
+                        LOGGER.info("Injected cookiefile into _ytdl_params")
                 except Exception as e:
                     LOGGER.warning(f"Could not set cookiefile in spotdl downloader: {e}")
-            
-            # Get songs from link
+
             songs = self.spotdl_client.search([link])
 
-            # Tentar anexar um logger customizado para capturar mensagens do spotdl
             try:
                 if hasattr(self.spotdl_client, "logger"):
                     self.spotdl_client.logger = MyLogger(self, self._listener)
@@ -228,27 +229,23 @@ class SpotdlHelper:
                         dl._logger = MyLogger(self, self._listener)
             except Exception as e:
                 LOGGER.warning(f"Could not attach spotdl logger: {e}")
-            
+
             if not songs:
                 raise ValueError("No songs found in Spotify link")
-            
-            # ✅ CORREÇÃO 3: Contagem correta
+
             self.total_songs = len(songs)
-            self.playlist_count = 0  # Reset counter
-            
-            # Check if playlist
+            self.playlist_count = 0
+
             if len(songs) > 1:
                 self.is_playlist = True
-                
-            # Calculate total size (estimate: 320kbps * duration)
+
             total_size = 0
             for song in songs:
                 if hasattr(song, 'duration') and song.duration:
-                    # 320kbps = 40KB/s, convert seconds to bytes
                     total_size += int(song.duration * 40000)
-            
+
             self._listener.size = total_size if total_size > 0 else 1024 * 1024
-            
+
             if not self._listener.name:
                 if self.is_playlist:
                     if hasattr(songs[0], 'album_name') and songs[0].album_name:
@@ -258,128 +255,118 @@ class SpotdlHelper:
                     else:
                         self._listener.name = f"Spotify_Playlist_{self.total_songs}_songs"
                 else:
-                    # Single song
                     song = songs[0]
                     artist = song.artist if hasattr(song, 'artist') else 'Unknown'
                     name = song.name if hasattr(song, 'name') else 'Unknown'
                     self._listener.name = f"{artist} - {name}.mp3"
-                    
+
             return songs
-            
+
         except Exception as e:
             LOGGER.error(f"Error extracting metadata: {e}")
             self._on_download_error(str(e))
             return None
 
-    def _download(self, path, songs):
-        """Download songs using spotdl"""
+    def _download(self, dl_path, songs):
+        """Download songs using spotdl.
+        
+        Nota: o argumento foi renomeado de 'path' para 'dl_path' para evitar
+        sombreamento do módulo ospath importado no topo do arquivo.
+        """
         try:
             if not songs:
                 raise ValueError("No songs to download")
-            
-            # ✅ CORREÇÃO 2: Criar diretório se não existir
-            if not ospath.exists(path):
-                makedirs(path, exist_ok=True)
-                LOGGER.info(f"Created download directory: {path}")
-            
-            # Create output path for playlist
+
+            if not ospath.exists(dl_path):
+                makedirs(dl_path, exist_ok=True)
+                LOGGER.info(f"Created download directory: {dl_path}")
+
             if self.is_playlist:
-                output_path = ospath.join(path, self._listener.name)
+                output_path = ospath.join(dl_path, self._listener.name)
                 makedirs(output_path, exist_ok=True)
             else:
-                output_path = path
-            
+                output_path = dl_path
+
             LOGGER.info(f"Downloading {len(songs)} song(s) to: {output_path}")
-            
-            # ✅ Download songs one by one
+
             for idx, song in enumerate(songs, 1):
                 if self._listener.is_cancelled:
                     LOGGER.info(f"Download cancelled by user at {idx}/{len(songs)}")
                     break
-                    
+
                 try:
                     LOGGER.info(f"[{idx}/{len(songs)}] Downloading: {song.name}")
-                    
-                    # Download individual song
+
                     try:
                         result, error = self.spotdl_client.downloader.download_song(
                             song, output=output_path
                         )
                     except TypeError:
-                        # Older/newer spotdl API might not accept output arg;
-                        # fallback: temporarily change cwd to output_path
+                        # API do spotdl desta versão não aceita output= como argumento;
+                        # fallback: muda cwd temporariamente para output_path.
                         prev_cwd = getcwd()
                         try:
-                            # Antes de mudar o cwd, se existir cookie do usuário,
-                            # copie para o diretório de saída como cookies.txt para
-                            # garantir que o yt-dlp interno o encontre.
-                            try:
-                                if self.cookie_to_use and path.exists(self.cookie_to_use):
-                                    dest_cookie = ospath.join(output_path, "cookies.txt")
-                                    copyfile(self.cookie_to_use, dest_cookie)
-                            except Exception as e:
-                                LOGGER.warning(f"Could not copy cookie file to output dir: {e}")
+                            # FIX: usa self.cookie_to_use (atributo da instância)
+                            # FIX: usa ospath.exists() em vez de path.exists()
+                            if self.cookie_to_use and ospath.exists(self.cookie_to_use):
+                                dest_cookie = ospath.join(output_path, "cookies.txt")
+                                copyfile(self.cookie_to_use, dest_cookie)
+                                LOGGER.info(f"Copied cookie file to output dir: {dest_cookie}")
                             chdir(output_path)
-                            result, error = self.spotdl_client.downloader.download_song(
-                                song
-                            )
+                            result, error = self.spotdl_client.downloader.download_song(song)
+                        except Exception as e:
+                            LOGGER.warning(f"Could not copy cookie file to output dir: {e}")
+                            chdir(output_path)
+                            result, error = self.spotdl_client.downloader.download_song(song)
                         finally:
                             chdir(prev_cwd)
-                    
+
                     if result:
                         self.playlist_count += 1
                         LOGGER.info(f"✅ [{self.playlist_count}/{len(songs)}] Downloaded: {song.name}")
                     else:
                         LOGGER.error(f"❌ Failed to download {song.name}: {error}")
-                    
+
                 except Exception as e:
                     LOGGER.error(f"❌ Error downloading {song.name}: {e}")
                     continue
-            
+
             if self._listener.is_cancelled:
                 return
-            
+
             LOGGER.info(f"Download complete: {self.playlist_count}/{len(songs)} songs downloaded")
-            # Log contents of expected output directories for debugging
+
             try:
                 if ospath.exists(output_path):
                     files = [f for f in __import__("os").listdir(output_path)]
                     LOGGER.info(f"Files in output_path ({output_path}): {files}")
-                else:
-                    LOGGER.info(f"Expected output_path does not exist: {output_path}")
-                if ospath.exists(path):
-                    root_files = [f for f in __import__("os").listdir(path)]
-                    LOGGER.info(f"Files in path ({path}): {root_files}")
-                else:
-                    LOGGER.info(f"Expected path does not exist: {path}")
+                if ospath.exists(dl_path):
+                    root_files = [f for f in __import__("os").listdir(dl_path)]
+                    LOGGER.info(f"Files in dl_path ({dl_path}): {root_files}")
             except Exception as e:
                 LOGGER.warning(f"Could not list download dirs for debug: {e}")
-            # ✅ Chamar on_download_complete SOMENTE se baixou algo
+
             if self.playlist_count > 0:
                 async_to_sync(self._listener.on_download_complete)
             else:
                 self._on_download_error("No songs were downloaded successfully")
-            
+
         except Exception as e:
             LOGGER.error(f"Download error: {e}")
             if not self._listener.is_cancelled:
                 self._on_download_error(str(e))
         finally:
-            # Não destruímos o cliente singleton aqui, apenas removemos a
-            # referência local — o client compartilhado vive no módulo.
             self.spotdl_client = None
 
-    async def add_download(self, path):
+    async def add_download(self, dl_path):
         self._gid = token_hex(5)
 
         await self._on_download_start()
 
-        # Extract metadata
         songs = await sync_to_async(self._extract_meta_data, self._listener.link)
         if not songs or self._listener.is_cancelled:
             return
 
-        # Check for duplicates and limits
         msg, button = await stop_duplicate_check(self._listener)
         if msg:
             await self._listener.on_download_error(msg, button)
@@ -389,7 +376,6 @@ class SpotdlHelper:
             await self._listener.on_download_error(limit_exceeded, is_limit=True)
             return
 
-        # Check if should queue
         add_to_queue, event = await check_running_tasks(self._listener)
         if add_to_queue:
             LOGGER.info(f"Added to Queue/Download: {self._listener.name}")
@@ -406,16 +392,14 @@ class SpotdlHelper:
         if not add_to_queue:
             LOGGER.info(f"Download from Spotify: {self._listener.name}")
 
-        # Start download
-        await sync_to_async(self._download, path, songs)
+        await sync_to_async(self._download, dl_path, songs)
 
     async def cancel_task(self):
         self._listener.is_cancelled = True
         LOGGER.info(f"Cancelling Spotify Download: {self._listener.name}")
-        
-        # Cleanup client
+
         if self.spotdl_client:
             with suppress(Exception):
                 self.spotdl_client = None
-        
+
         await self._listener.on_download_error("Stopped by User!")
