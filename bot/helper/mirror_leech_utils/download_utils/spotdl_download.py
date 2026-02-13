@@ -1,5 +1,6 @@
 from logging import getLogger
-from os import path as ospath, makedirs, getcwd, chdir
+from os import path as ospath, makedirs, getcwd, chdir, path
+from shutil import rmtree, copyfile
 from secrets import token_hex
 from contextlib import suppress
 from shutil import rmtree
@@ -178,6 +179,18 @@ class SpotdlHelper:
     def _extract_meta_data(self, link):
         """Extract metadata from Spotify link"""
         try:
+            # Decide qual arquivo de cookies usar (mesma lógica do módulo ytdlp)
+            cookie_to_use = None
+            try:
+                usr_cookie = self._listener.user_dict.get("USER_COOKIE_FILE", "")
+                use_default = self._listener.user_dict.get("USE_DEFAULT_COOKIE", False)
+                if not use_default and usr_cookie and path.exists(usr_cookie):
+                    cookie_to_use = usr_cookie
+                elif path.exists("cookies.txt"):
+                    cookie_to_use = "cookies.txt"
+            except Exception:
+                cookie_to_use = None
+
             # Inicializa/obtém cliente Spotdl compartilhado para evitar erro
             ffmpeg_path = get_ffmpeg_path()
             self.spotdl_client = get_spotdl_client(
@@ -186,6 +199,18 @@ class SpotdlHelper:
                 fmt="mp3",
                 threads=4,
             )
+
+            # Tentar injetar cookiefile nas opções do downloader/yt-dlp, se possível
+            if cookie_to_use and hasattr(self.spotdl_client, "downloader"):
+                try:
+                    dl = self.spotdl_client.downloader
+                    # vários nomes possíveis internalmente
+                    if hasattr(dl, "ydl_opts") and isinstance(dl.ydl_opts, dict):
+                        dl.ydl_opts["cookiefile"] = cookie_to_use
+                    if hasattr(dl, "_ytdl_params") and isinstance(dl._ytdl_params, dict):
+                        dl._ytdl_params["cookiefile"] = cookie_to_use
+                except Exception as e:
+                    LOGGER.warning(f"Could not set cookiefile in spotdl downloader: {e}")
             
             # Get songs from link
             songs = self.spotdl_client.search([link])
@@ -284,6 +309,15 @@ class SpotdlHelper:
                         # fallback: temporarily change cwd to output_path
                         prev_cwd = getcwd()
                         try:
+                            # Antes de mudar o cwd, se existir cookie do usuário,
+                            # copie para o diretório de saída como cookies.txt para
+                            # garantir que o yt-dlp interno o encontre.
+                            try:
+                                if cookie_to_use and path.exists(cookie_to_use):
+                                    dest_cookie = ospath.join(output_path, "cookies.txt")
+                                    copyfile(cookie_to_use, dest_cookie)
+                            except Exception as e:
+                                LOGGER.warning(f"Could not copy cookie file to output dir: {e}")
                             chdir(output_path)
                             result, error = self.spotdl_client.downloader.download_song(
                                 song

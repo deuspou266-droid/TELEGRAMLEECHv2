@@ -5,7 +5,7 @@ from uvloop import install
 install()
 
 from subprocess import run as srun
-from os import getcwd
+from os import getcwd, makedirs, path as ospath
 from asyncio import Lock, new_event_loop, set_event_loop
 from logging import (
     ERROR,
@@ -52,7 +52,17 @@ threads = max(1, cpu_no // 2)
 cores = ",".join(str(i) for i in range(threads))
 
 bot_cache = {}
-DOWNLOAD_DIR = "/usr/src/app/downloads/"
+_DEFAULT_DOWNLOAD_DIR = "/usr/src/app/downloads/"
+# If the default path doesn't exist (e.g., running outside the container),
+# fall back to a downloads folder inside the project and create it.
+if not ospath.exists(_DEFAULT_DOWNLOAD_DIR):
+    _DEFAULT_DOWNLOAD_DIR = f"{getcwd()}/downloads/"
+    try:
+        makedirs(_DEFAULT_DOWNLOAD_DIR, exist_ok=True)
+    except Exception:
+        pass
+
+DOWNLOAD_DIR = _DEFAULT_DOWNLOAD_DIR
 intervals = {"status": {}, "qb": "", "jd": "", "nzb": "", "stopAll": False}
 qb_torrents = {}
 jd_downloads = {}
