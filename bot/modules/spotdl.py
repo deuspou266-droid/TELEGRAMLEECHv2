@@ -143,6 +143,8 @@ class Spotdl(TaskListener):
         await spotdl.add_download(path)
         await self.run_multi(input_list, Spotdl)
 
+        # Removido: tentativa falha de buscar cookies.txt do navegador
+        # O yt-dlp agora usa o servidor POT via --extractor-args
 
 async def spotdl(client, message):
     bot_loop.create_task(Spotdl(client, message).new_event())
